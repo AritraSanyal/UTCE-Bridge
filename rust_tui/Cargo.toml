@@ -8,4 +8,4 @@ crossterm = "0.29.0"
 image = "0.25.10"
 nokhwa = { version = "0.10.10", features = ["input-native"] }
 ratatui = "0.30.0"
-ratatui-image = { version = "10.0.6", features = ["crossterm"] }
+ratatui-image = { version = "10.0.6", default-features = false, features = ["crossterm"] }
