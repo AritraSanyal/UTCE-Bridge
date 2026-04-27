@@ -35,6 +35,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4. START CAMERA THREAD
     thread::spawn(move || {
         let index = CameraIndex::Index(0);
+
+        // FIX: -- HARDWARE:  Reverted to the format we know camera accepts
         let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
         
         let mut camera = match Camera::new(index, requested) {
@@ -48,16 +50,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         camera.open_stream().unwrap();
 
         loop {
+            // camera.frame() is blocking. It keeps perfect sync with the camera hardware tick.
             if let Ok(frame) = camera.frame() {
                 if let Ok(dynamic_img) = frame.decode_image::<RgbFormat>() {
-                    let img = DynamicImage::ImageRgb8(dynamic_img);
+                    let mut img = DynamicImage::ImageRgb8(dynamic_img);
+                    
+                    // SOFTWARE FIX: Since the camera won't do it natively, we shrink it 
+                    // extremely fast here so the UI thread doesn't choke on a 1080p image.
+                    img = img.resize_exact(640, 480, image::imageops::FilterType::Nearest);
+
                     if tx_frame.send(img).is_err() {
                         break; 
                     }
                 }
             }
-            // Cap at ~60 FPS to prevent CPU burnout
-            thread::sleep(Duration::from_millis(16)); 
+            // Notice: No thread::sleep() here. We run as fast as the camera allows.
         }
     });
 
@@ -65,16 +72,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut current_frame_protocol: Option<StatefulProtocol> = None;
 
     loop {
-        // Non-blocking check for new camera frames
-        if let Ok(dynamic_image) = rx_frame.try_recv() {
-            current_frame_protocol = Some(picker.new_resize_protocol(dynamic_image));
+        // PERFORMANCE FIX: Drain the channel backlog
+        // This ensures the terminal NEVER falls behind the physical camera
+        let mut latest_frame = None;
+        while let Ok(dynamic_image) = rx_frame.try_recv() {
+            latest_frame = Some(dynamic_image);
+        }
+
+        if let Some(img) = latest_frame {
+            current_frame_protocol = Some(picker.new_resize_protocol(img));
         }
 
         // Draw the UI
         terminal.draw(|f| {
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
-                // THE FIX: Array passed directly, no .as_ref()
                 .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
                 .split(f.area());
 
@@ -99,8 +111,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             f.render_widget(sidebar_widget, chunks[1]);
         })?;
 
-        // 6. HANDLE KEYBOARD EVENTS (Exit on 'q')
-        if event::poll(Duration::from_millis(10))? {
+        // 6. HANDLE KEYBOARD EVENTS
+        // PERFORMANCE FIX: 1ms poll ensures the UI loop runs at maximum speed
+        if event::poll(Duration::from_millis(1))? {
             if let Event::Key(key) = event::read()? {
                 if key.code == KeyCode::Char('q') {
                     break;
